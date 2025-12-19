@@ -282,8 +282,44 @@ def run_ixp_peering_wizard():
         md5_password = ""
 
     # 7. Execution
-    console.print(f"\nReady to create [bold]{len(actionable_sessions)}[/bold] items.")
-    if Prompt.ask("Proceed?", choices=["y", "n"]) == "y":
+
+    preview_table = Table(title="Planned BGP Sessions (Dry Run)", show_header=True, header_style="bold magenta")
+    preview_table.add_column("IXP Name", style="cyan")
+    preview_table.add_column("Remote IP", style="green")
+    preview_table.add_column("Limit", justify="right")
+    preview_table.add_column("AS-SET", style="yellow")
+    preview_table.add_column("MD5", style="red")
+
+    for session in actionable_sessions:
+        data = session['data']
+        ip_str = session['ip_str']
+        
+        is_v6 = ':' in ip_str
+        limit_val = final_limit_v6 if is_v6 else final_limit_v4
+        
+        raw_as_set_str = net_info.get('irr_as_set') or ""
+        as_set_parts = raw_as_set_str.strip().split(' ')
+        preview_as_set = as_set_parts[0] if as_set_parts else "-"
+        if as_set_parts and is_v6:
+             for candidate in as_set_parts[:2]:
+                if "V6" in candidate.upper():
+                    preview_as_set = candidate
+                    break
+        
+        md5_status = "Yes" if md5_password else "-"
+
+        preview_table.add_row(
+            escape(data['ix_name']), 
+            ip_str, 
+            str(limit_val), 
+            preview_as_set, 
+            md5_status
+        )
+
+    # draw the table
+    console.print(preview_table)
+
+    if Prompt.ask("Do you want to apply these changes to NetBox?", choices=["y", "n"]) == "y":
         console.print("\n[yellow]🚀 Launching Creation...[/yellow]")
         
         for session in actionable_sessions:
