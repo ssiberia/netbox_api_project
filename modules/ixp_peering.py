@@ -293,9 +293,6 @@ def run_ixp_peering_wizard():
     else:
         md5_password = ""
 
-    # 7. Execution PREPARE DATA FIRST (Dry Run Logic Optimization)
-
-    # ... (A kód eleje változatlan marad a 6. lépésig)
 
     # 7. Execution: PREPARE DATA FIRST (Dry Run Logic Optimization)
     
