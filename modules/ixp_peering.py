@@ -157,11 +157,13 @@ def run_ixp_peering_wizard():
 
     # 4. NetBox Validation
     # the goal is to check if the remote IPs exist in IPAM and if the BGP session exists (by any chance) to never duplicate
-    console.print(f"\n[bold cyan]=== VALIDATING RESOURCES ===[/bold cyan]")
+    console.print(f"\n[bold cyan]=== VALIDATING RESOURCES FROM NETBOX===[/bold cyan]")
     
     nb_client = NetBoxClient()
     ip_mgr = IPManager(nb_client)
     bgp_mgr = BGPManager(nb_client)
+    
+    console.print("[dim]ℹ️  Note: 'Missing IP' is normal; the script will create it for you.\n    However, if the [bold]Subnet[/bold] itself is missing, you must create it manually in NetBox first.[/dim]\n")
     
     valid_sessions = []
     status_table = Table(show_header=True, header_style="bold white")
@@ -258,15 +260,25 @@ def run_ixp_peering_wizard():
     # 6. Pre-flight checks and summary
     console.print(f"\n[bold cyan]=== PRE-FLIGHT CHECKS ===[/bold cyan]")
     
-    peer_group_id = nb_client.get_peer_group_id(PEER_GROUP_NAME)
-    my_asn_obj = nb_client.get_my_asn_object(MY_ASN)
-    # check if the tenant has the ASN object in NB
-    peer_asn_obj = nb_client.get_asn_for_tenant(target_asn, selected_tenant.id)
-    if not peer_asn_obj:
-        console.print(f"[bold red]❌ Error: AS{target_asn} not found under tenant '{escape(selected_tenant.name)}'![/bold red]")
-        console.print(f"[yellow]Action: Create AS{target_asn} in NetBox assigned to this tenant. Link: https://netbox.as5405.net/ipam/asns/add/[/yellow]")
-        input("Press Enter...")
-        return
+    peer_asn_obj = None
+    
+    while not peer_asn_obj:
+        peer_asn_obj = nb_client.get_asn_for_tenant(target_asn, selected_tenant.id)
+        
+        if peer_asn_obj:
+            console.print(f"[green]✅ Remote AS exists in NetBox: {target_asn} (NB ID: {peer_asn_obj.id})[/green]")
+            break # Siker, kilépünk a ciklusból
+        
+        # Ha nincs meg, szólunk és várunk
+        console.print(f"\n[bold red]❌ Error: AS{target_asn} not found under tenant '{escape(selected_tenant.name)}'![/bold red]")
+        console.print(f"[yellow]Action: Create AS{target_asn} in NetBox assigned to this tenant.[/yellow]")
+        console.print(f"[dim]Link: https://netbox.as5405.net/ipam/asns/add/[/dim]")
+        
+        # Választási lehetőség: Újrapróbál vagy Kilép
+        if Prompt.ask("\nHave you created the ASN? (Select 'y' to retry check)", choices=["y", "n"], default="y") == "n":
+            console.print("[dim]Aborted by user.[/dim]")
+            return
+    
     console.print(f"[green]Remote AS exist in NetBox: {target_asn} (NB ID: {peer_asn_obj.id})[/green]")
     console.print(f"[green]IPv4 Limit: {final_limit_v4} (from PeeringDB)[green]")
     console.print(f"[green]IPv6 Limit: {final_limit_v6} (from PeeringDB)[green]")
@@ -281,132 +293,168 @@ def run_ixp_peering_wizard():
     else:
         md5_password = ""
 
-    # 7. Execution
+    # 7. Execution PREPARE DATA FIRST (Dry Run Logic Optimization)
 
-    preview_table = Table(title="Planned BGP Sessions (Dry Run)", show_header=True, header_style="bold magenta")
-    preview_table.add_column("IXP Name", style="cyan")
-    preview_table.add_column("Remote IP", style="green")
-    preview_table.add_column("Limit", justify="right")
-    preview_table.add_column("AS-SET", style="yellow")
-    preview_table.add_column("MD5", style="red")
+    # ... (A kód eleje változatlan marad a 6. lépésig)
 
-    for session in actionable_sessions:
-        data = session['data']
-        ip_str = session['ip_str']
-        
-        is_v6 = ':' in ip_str
-        limit_val = final_limit_v6 if is_v6 else final_limit_v4
-        
-        raw_as_set_str = net_info.get('irr_as_set') or ""
-        as_set_parts = raw_as_set_str.strip().split(' ')
-        preview_as_set = as_set_parts[0] if as_set_parts else "-"
-        if as_set_parts and is_v6:
-             for candidate in as_set_parts[:2]:
-                if "V6" in candidate.upper():
-                    preview_as_set = candidate
-                    break
-        
-        md5_status = "Yes" if md5_password else "-"
-
-        preview_table.add_row(
-            escape(data['ix_name']), 
-            ip_str, 
-            str(limit_val), 
-            preview_as_set, 
-            md5_status
-        )
-
-    # draw the table
-    console.print(preview_table)
-
-    if Prompt.ask("Do you want to apply these changes to NetBox?", choices=["y", "n"]) == "y":
-        console.print("\n[yellow]🚀 Launching Creation...[/yellow]")
-        
+    # 7. Execution: PREPARE DATA FIRST (Dry Run Logic Optimization)
+    
+    prepared_sessions = []
+    
+    with console.status("[bold green]Calculating final parameters (Dry Run)...[/bold green]"):
         for session in actionable_sessions:
             data = session['data']
             ip_str = session['ip_str']
-            exists = session['exists']
             
-            console.print(f"\n[bold white]--- {escape(data['ix_name'])} ({ip_str}) ---[/bold white]")
-
-            # A) Resolve Local Context & Mask from IPAM
-            local_ip_str = data['local_ip4'] if ':' not in ip_str else data['local_ip6']
-            console.print(f"   Resolving Local Context from {local_ip_str}...")
-            
-            local_ip_obj = ip_mgr.get_ip_address(local_ip_str)
-            ctx = ip_mgr.get_device_site_from_ip(local_ip_str)
-
-            if not local_ip_obj or not ctx:
-                console.print(f"     [bold red]❌ Critical: Local IP {local_ip_str} not found or not assigned to Device![/bold red]")
-                continue
-            
-            try:
-                mask = local_ip_obj.address.split('/')[-1]
-                target_ip_with_cidr = f"{ip_str}/{mask}"
-                console.print(f"     📍 Site: [bold]{ctx['site_name']}[/bold] | Device: [bold]{ctx['device_name']}[/bold]")
-            except Exception:
-                target_ip_with_cidr = ip_str
-
-            # B) Create Remote IP
-            remote_ip_obj = session.get('ip_obj')
-            if not exists:
-                console.print(f"   Creating Remote IP [cyan]{target_ip_with_cidr}[/cyan]...")
-                desc = f"{selected_tenant.name} - {data['ix_name']}"
-                new_ip = ip_mgr.create_ip_address(target_ip_with_cidr, selected_tenant.id, desc)
-                if new_ip:
-                    console.print(f"     [green]✅ IP Created (ID: {new_ip.id})[/green]")
-                    session['ip_obj'] = new_ip
-                else:
-                    console.print(f"     [bold red]❌ IP Creation Failed. Skipping.[/bold red]")
-                    continue
-            else:
-                console.print(f"   [dim]IP exists (ID: {remote_ip_obj.id}).[/dim]")
-
-            # C) Create BGP Session
+            # 1. Determine IP Version and Limits
             is_v6 = ':' in ip_str
             addr_family = "6u" if is_v6 else "4u"
-            
             prefix_limit = final_limit_v6 if is_v6 else final_limit_v4
             
-            # better AS-SET selection (separate AS-SET from AS-SET-V6)
+            # 2. AS-SET Selection logic
             raw_as_set_str = net_info.get('irr_as_set') or ""
             as_set_parts = raw_as_set_str.strip().split(' ')
             
             final_as_set = as_set_parts[0] if as_set_parts else ""
-
             if as_set_parts:
                 candidates = as_set_parts[:2] 
                 for candidate in candidates:
                     if is_v6 and "V6" in candidate.upper():
                         final_as_set = candidate
                         break
-
-            # cleanup name of non ascii characters
+            
+            # 3. Name Sanitization
             raw_name = selected_tenant.name
             clean_name = re.sub(r'[^a-zA-Z0-9]', '', raw_name)
-
-            session_name = raw_name
-            desc = f"[peer_type=peer_ixp,peer_as={target_asn},peer_name={clean_name}]"
             
-            console.print(f"   Creating BGP Session: [bold cyan]{escape(session_name)}[/]...")
-            # magic starts here!
+            # 4. Description & Session Name Generation
+            session_name = raw_name # Vagy clean_name, ha azt szeretnéd névnek is
+            bgp_desc = f"[peer_type=peer_ixp,peer_as={target_asn},peer_name={clean_name}]"
+            ip_desc = f"{selected_tenant.name} - {data['ix_name']}"
+
+            # 5. Resolve Local Context & Mask (CRITICAL STEP)
+            # We do this NOW, so we can show errors in the table if local context is missing.
+            local_ip_str = data['local_ip4'] if not is_v6 else data['local_ip6']
+            local_ctx = ip_mgr.get_device_site_from_ip(local_ip_str)
+            local_ip_obj = ip_mgr.get_ip_address(local_ip_str)
+            
+            target_ip_with_cidr = ip_str # Default fallback
+            site_name = "[red]???[/red]"
+            device_name = "[red]???[/red]"
+            ready_to_deploy = False
+
+            if local_ip_obj and local_ctx:
+                try:
+                    mask = local_ip_obj.address.split('/')[-1]
+                    target_ip_with_cidr = f"{ip_str}/{mask}"
+                    site_name = local_ctx['site_name']
+                    device_name = local_ctx['device_name']
+                    ready_to_deploy = True
+                except Exception:
+                    pass
+            
+            # Store everything in a prepared dict
+            prepared_sessions.append({
+                'original_data': session,
+                'is_v6': is_v6,
+                'target_ip_with_cidr': target_ip_with_cidr,
+                'site_name': site_name,
+                'device_name': device_name,
+                'local_ctx': local_ctx,           # Pass objects for creation
+                'local_ip_obj': local_ip_obj,     # Pass objects for creation
+                'prefix_limit': int(prefix_limit),
+                'as_set': final_as_set,
+                'addr_family': addr_family,
+                'session_name': session_name,
+                'bgp_desc': bgp_desc,
+                'ip_desc': ip_desc,
+                'ready': ready_to_deploy
+            })
+
+    # --- DISPLAY DRY RUN TABLE ---
+    preview_table = Table(title="Planned BGP Sessions (Dry Run)", show_header=True, header_style="bold magenta")
+    preview_table.add_column("IXP Name", style="cyan")
+    preview_table.add_column("Remote IP / Device", style="green") # Combined column
+    preview_table.add_column("Limit", justify="right")
+    preview_table.add_column("AS-SET", style="yellow")
+    preview_table.add_column("MD5", style="red")
+    preview_table.add_column("Status", justify="center")
+
+    for item in prepared_sessions:
+        ix_name = item['original_data']['data']['ix_name']
+        md5_status = "Yes" if md5_password else "-"
+        
+        # Format: IP \n Device
+        loc_info = f"{item['target_ip_with_cidr']}\n[dim]on {item['device_name']}[/dim]"
+        
+        status_icon = "✅" if item['ready'] else "❌ Context Missing"
+
+        preview_table.add_row(
+            escape(ix_name), 
+            loc_info, 
+            str(item['prefix_limit']), 
+            item['as_set'], 
+            md5_status,
+            status_icon
+        )
+
+    console.print(preview_table)
+
+    # Filter out broken sessions (where local context was missing)
+    deployable_sessions = [p for p in prepared_sessions if p['ready']]
+    
+    if not deployable_sessions:
+        console.print("[bold red]❌ No sessions are ready to be deployed (check Local IPs in NetBox).[/bold red]")
+        input("Press Enter...")
+        return
+
+    if Prompt.ask(f"Do you want to apply these {len(deployable_sessions)} changes to NetBox?", choices=["y", "n"]) == "y":
+        console.print("\n[yellow]🚀 Launching Creation...[/yellow]")
+        
+        for item in deployable_sessions:
+            # UNPACK PRE-CALCULATED DATA
+            # No more logic here, just API calls!
+            
+            data = item['original_data']['data']
+            session = item['original_data']
+            
+            console.print(f"\n[bold white]--- {escape(data['ix_name'])} ---[/bold white]")
+            console.print(f"     📍 Site: [bold]{item['site_name']}[/bold] | Device: [bold]{item['device_name']}[/bold]")
+
+            # B) Create Remote IP
+            remote_ip_obj = session['ip_obj']
+            if not session['exists']:
+                console.print(f"   Creating Remote IP [cyan]{item['target_ip_with_cidr']}[/cyan]...")
+                new_ip = ip_mgr.create_ip_address(item['target_ip_with_cidr'], selected_tenant.id, item['ip_desc'])
+                if new_ip:
+                    console.print(f"     [green]✅ IP Created (ID: {new_ip.id})[/green]")
+                    # Update the object for BGP creation
+                    item['original_data']['ip_obj'] = new_ip 
+                else:
+                    console.print(f"     [bold red]❌ IP Creation Failed. Skipping BGP.[/bold red]")
+                    continue
+            else:
+                console.print(f"   [dim]IP exists (ID: {remote_ip_obj.id}).[/dim]")
+
+            # C) Create BGP Session
+            console.print(f"   Creating BGP Session: [bold cyan]{escape(item['session_name'])}[/]...")
             try:
                 bgp_s = bgp_mgr.create_bgp_session(
-                    name=session_name,
-                    site_id=ctx['site_id'],
-                    device_id=ctx['device_id'],
+                    name=item['session_name'],
+                    site_id=item['local_ctx']['site_id'],
+                    device_id=item['local_ctx']['device_id'],
                     tenant_id=selected_tenant.id,
-                    local_ip_id=local_ip_obj.id,
-                    remote_ip_id=session['ip_obj'].id,
+                    local_ip_id=item['local_ip_obj'].id,
+                    remote_ip_id=item['original_data']['ip_obj'].id, # Use the object (either found or just created)
                     local_as_id=my_asn_obj.id,
                     remote_as_id=peer_asn_obj.id,
                     peer_group_id=peer_group_id,
-                    address_family=addr_family,
-                    as_set=final_as_set, 
-                    prefix_limit=int(prefix_limit),
+                    address_family=item['addr_family'],
+                    as_set=item['as_set'], 
+                    prefix_limit=item['prefix_limit'],
                     sync_pdb=should_sync,
                     md5_key=md5_password,
-                    description=desc
+                    description=item['bgp_desc']
                 )
                 console.print(f"     [bold green]✅ BGP Session Created (ID: {bgp_s.id})[/bold green]")
             except Exception as e:
