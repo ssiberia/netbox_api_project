@@ -295,7 +295,9 @@ def run_ixp_peering_wizard():
 
 
     # 7. Execution: PREPARE DATA FIRST (Dry Run Logic Optimization)
-    
+    my_asn_obj = nb_client.get_asn(MY_ASN)
+    peer_group = nb_client.get_bgp_group_by_name(PEER_GROUP_NAME)
+
     prepared_sessions = []
     
     with console.status("[bold green]Calculating final parameters (Dry Run)...[/bold green]"):
@@ -445,7 +447,7 @@ def run_ixp_peering_wizard():
                     remote_ip_id=item['original_data']['ip_obj'].id, # Use the object (either found or just created)
                     local_as_id=my_asn_obj.id,
                     remote_as_id=peer_asn_obj.id,
-                    peer_group_id=peer_group_id,
+                    peer_group_id=peer_group.id,
                     address_family=item['addr_family'],
                     as_set=item['as_set'], 
                     prefix_limit=item['prefix_limit'],
