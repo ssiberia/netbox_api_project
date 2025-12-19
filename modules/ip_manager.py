@@ -10,21 +10,17 @@ class IPManager:
 
     def get_ip_address(self, address: str) -> Optional[object]:
         # Checks if an IP address exists in NetBox IPAM.
-        try:
-            ip_obj = self.nb.ipam.ip_addresses.get(address=address)
-            return ip_obj
-        except Exception:
-            return None
+        return self.nb.ipam.ip_addresses.get(address=address)
+
 
     def get_prefix_for_ip(self, ip_address: str) -> Optional[object]:
         # Finds the parent Prefix for a given IP address.
-        try:
-            prefixes = self.nb.ipam.prefixes.filter(contains=ip_address)
-            prefix_list = list(prefixes)
-            # Return the longest prefix
-            return prefix_list[0] if prefix_list else None
-        except Exception:
-            return None
+        prefixes = self.nb.ipam.prefixes.filter(contains=ip_address)
+        # sort by smallest mask size
+        sorted_prefixes = sorted(prefixes, key=lambda p: int(str(p.prefix).split('/')[1]), reverse=True)
+        # Return the longest prefix
+        return sorted_prefixes[0] if sorted_prefixes else None
+
 
     def get_device_site_from_ip(self, ip_address: str) -> Optional[Dict]:
         # Tries to find the Device and Site associated with a Local IP.

@@ -27,7 +27,7 @@ def print_banner():
     console.clear()
     console.print(Panel.fit(
         "[bold cyan]CHORES TOOLBOX CLI[/bold cyan]\n"
-        "[dim]by Attila Kovács[/dim]",
+        "[dim]by Attila Kovacs[/dim]",
         border_style="cyan"
     ))
 
@@ -63,3 +63,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         console.print("\n[bold red]Aborted by user![/bold red]")
         sys.exit()
+    except Exception as e:  # all other unexpected errors (timeout etc)
+        console.print(f"\n[bold red]💥 CRITICAL ERROR: {e}[/bold red]")
+        sys.exit(1)

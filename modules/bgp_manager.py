@@ -30,11 +30,10 @@ class BGPManager:
                            as_set: str = "",
                            prefix_limit: int = 0,
                            sync_pdb: bool = False,
-                           md5_key: str = "",  # <--- ÚJ PARAMÉTER
+                           md5_key: str = "",
                            description: str = "") -> object:
-        """
-        Creates a BGP Session with full custom fields support.
-        """
+        
+        #Creates a BGP Session with full custom fields support.
         try:
             limit_val = int(prefix_limit)
         except (ValueError, TypeError):
