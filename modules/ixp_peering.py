@@ -11,6 +11,7 @@ from modules.peeringdb_client import PeeringDBClient
 from modules.netbox_client import NetBoxClient
 from modules.ip_manager import IPManager
 from modules.bgp_manager import BGPManager
+from modules.utils import get_validated_prefix_limits, select_tenant
 
 # Configuration
 MY_ASN = 5405
@@ -129,31 +130,9 @@ def run_ixp_peering_wizard():
     if not selected_indices:
         return
 
-    # check for prefix-limit (peeringdb is sometimes funny)
-    pdb_limit_v4 = net_info.get('info_prefix_limit_v4') or net_info.get('info_prefixes4') or 0
-    pdb_limit_v6 = net_info.get('info_prefix_limit_v6') or net_info.get('info_prefixes6') or 0
-    
-    final_limit_v4 = int(pdb_limit_v4)
-    final_limit_v6 = int(pdb_limit_v6)
-    
-    # Important! If prefix-limit is invalid, we ask the user for manual input
-    if final_limit_v4 == 0:
-        console.print(f"[yellow]⚠️  IPv4 Prefix Limit is 0 or missing in PeeringDB.[/yellow]")
-        if Prompt.ask("Do you want to set a manual IPv4 limit?", choices=["y", "n"], default="y") == "y":
-            while True:
-                val = Prompt.ask("Enter IPv4 Limit (integer)")
-                if val.isdigit() and int(val) > 0:
-                    final_limit_v4 = int(val)
-                    break
+    # extract and fix prefix-limits
 
-    if final_limit_v6 == 0:
-        console.print(f"[yellow]⚠️  IPv6 Prefix Limit is 0 or missing in PeeringDB.[/yellow]")
-        if Prompt.ask("Do you want to set a manual IPv6 limit?", choices=["y", "n"], default="y") == "y":
-            while True:
-                val = Prompt.ask("Enter IPv6 Limit (integer)")
-                if val.isdigit() and int(val) > 0:
-                    final_limit_v6 = int(val)
-                    break
+    final_limit_v4, final_limit_v6 = get_validated_prefix_limits(net_info)
 
     # 4. NetBox Validation
     # the goal is to check if the remote IPs exist in IPAM and if the BGP session exists (by any chance) to never duplicate
@@ -220,40 +199,7 @@ def run_ixp_peering_wizard():
 
     # 5. Tenant checking and assignment
     console.print(f"\n[bold cyan]=== TENANT ASSIGNMENT ===[/bold cyan]")
-    pdb_name = net_info.get('name')
-    console.print(f"Searching NetBox for: [bold]{escape(pdb_name)}[/bold]...")
-    
-    selected_tenant = None
-    search_term = pdb_name
-
-    while not selected_tenant:
-        candidates = nb_client.get_tenant_by_name(search_term)
-        
-        if not candidates:
-            console.print(f"[yellow]⚠️ No tenant found for '{escape(search_term)}'.[/yellow]")
-            search_term = Prompt.ask("Enter search term (or 'q' to quit)")
-            if search_term.lower() == 'q': return
-            continue
-
-        if len(candidates) == 1:
-            t = candidates[0]
-            console.print(f"[green]✅ Match: {escape(t.name)} (ID: {t.id})[/green]")
-            if Prompt.ask("Use this Tenant?", choices=["y", "n"], default="y") == "y":
-                selected_tenant = t
-            else:
-                search_term = Prompt.ask("Enter search term")
-        else:
-            console.print(f"[cyan]Multiple tenants found:[/cyan]")
-            for i, t in enumerate(candidates, 1):
-                print(f"{i}. {escape(t.name)} ({escape(t.slug)})")
-            
-            sel = Prompt.ask("Select # (or 0 to search again)")
-            if sel.isdigit():
-                val = int(sel)
-                if val == 0: 
-                    search_term = Prompt.ask("Enter search term")
-                elif 1 <= val <= len(candidates): 
-                    selected_tenant = candidates[val - 1]
+    selected_tenant = select_tenant(nb_client, net_info.get('name'))
 
     console.print(f"[bold green]🔒 Selected: {escape(selected_tenant.name)}[/bold green]")
 
@@ -279,7 +225,6 @@ def run_ixp_peering_wizard():
             console.print("[dim]Aborted by user.[/dim]")
             return
     
-    console.print(f"[green]Remote AS exist in NetBox: {target_asn} (NB ID: {peer_asn_obj.id})[/green]")
     console.print(f"[green]IPv4 Limit: {final_limit_v4} (from PeeringDB)[green]")
     console.print(f"[green]IPv6 Limit: {final_limit_v6} (from PeeringDB)[green]")
 
@@ -369,6 +314,13 @@ def run_ixp_peering_wizard():
                 'ip_desc': ip_desc,
                 'ready': ready_to_deploy
             })
+    
+    deployable_sessions = [p for p in prepared_sessions if p['ready']]
+
+    if not deployable_sessions:
+        console.print("[bold red]❌ No sessions are ready to be deployed (check Local IPs in NetBox).[/bold red]")
+        input("Press Enter...")
+        return
 
     # --- DISPLAY DRY RUN TABLE ---
     preview_table = Table(title="Planned BGP Sessions (Dry Run)", show_header=True, header_style="bold magenta")
@@ -377,35 +329,24 @@ def run_ixp_peering_wizard():
     preview_table.add_column("Limit", justify="right")
     preview_table.add_column("AS-SET", style="yellow")
     preview_table.add_column("MD5", style="red")
-    preview_table.add_column("Status", justify="center")
 
-    for item in prepared_sessions:
+
+    for item in deployable_sessions:
         ix_name = item['original_data']['data']['ix_name']
         md5_status = "Yes" if md5_password else "-"
         
         # Format: IP \n Device
         loc_info = f"{item['target_ip_with_cidr']}\n[dim]on {item['device_name']}[/dim]"
         
-        status_icon = "✅" if item['ready'] else "❌ Context Missing"
-
         preview_table.add_row(
             escape(ix_name), 
             loc_info, 
             str(item['prefix_limit']), 
             item['as_set'], 
-            md5_status,
-            status_icon
+            md5_status
         )
 
     console.print(preview_table)
-
-    # Filter out broken sessions (where local context was missing)
-    deployable_sessions = [p for p in prepared_sessions if p['ready']]
-    
-    if not deployable_sessions:
-        console.print("[bold red]❌ No sessions are ready to be deployed (check Local IPs in NetBox).[/bold red]")
-        input("Press Enter...")
-        return
 
     if Prompt.ask(f"Do you want to apply these {len(deployable_sessions)} changes to NetBox?", choices=["y", "n"]) == "y":
         console.print("\n[yellow]🚀 Launching Creation...[/yellow]")
