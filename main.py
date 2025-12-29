@@ -7,7 +7,9 @@ from rich.panel import Panel
 from rich.prompt import IntPrompt
 from rich import print
 
-from modules.ixp_peering import run_ixp_peering_wizard
+# Importáljuk az eszközeinket (Most még csak egy van)
+from modules.ixp_peering import IxpPeeringTool
+# Később ide jöhet majd: from modules.pni_peering import PniPeeringTool
 
 # Load environment variables
 load_dotenv()
@@ -32,29 +34,45 @@ def print_banner():
     ))
 
 def main_menu():
+    # --- A LISTA (Command Pattern) ---
+    # Itt regisztráljuk a rendszerbe az elérhető "Munkásokat".
+    # Ha új modult írsz, csak add hozzá ehhez a listához, és kész!
+    tools = [
+        IxpPeeringTool(),
+        # PniPeeringTool(), 
+        # SiteProvisioningTool(),
+    ]
+
     while True:
-        # banner
         print_banner()
         console.print("[bold green]What would you like to do?[/bold green]\n")
         
-        console.print("1. [bold green]Create Peering at IXP[/bold green]")
-        console.print("2. [dim]Something else (Coming soon...)[/dim]")
+        # --- DINAMIKUS MENÜ GENERÁLÁS ---
+        # A main.py nem tudja, mik ezek, csak megkérdezi a nevüket (.name)
+        for idx, tool in enumerate(tools, 1):
+            console.print(f"{idx}. [bold green]{tool.name}[/bold green]")
+        
         console.print("0. [bold red]Exit[/bold red]")
         print()
         
-        choice = IntPrompt.ask("Select an option", choices=["0", "1", "2"])
+        # Választás
+        valid_choices = [str(i) for i in range(len(tools) + 1)]
+        choice = IntPrompt.ask("Select an option", choices=valid_choices)
         
-        if choice == 1:
-            # call the def from the ixp_peering.py
-            run_ixp_peering_wizard()
-            
-        elif choice == 0:
+        if choice == 0:
             console.print("[bold cyan]👋 Goodbye![/bold cyan]")
             sys.exit()
         
-        else:
-            console.print("[bold red]⚠️ Feature not implemented yet![/bold red]")
-            time.sleep(1)
+        # --- FUTTATÁS ---
+        # A kiválasztott eszköz (.run) metódusát hívjuk meg.
+        # Ez a polimorfizmus: minden eszköz mást csinál a .run()-ra, de a main.py-t ez nem érdekli.
+        selected_tool = tools[choice - 1]
+        
+        try:
+            selected_tool.run()
+        except Exception as e:
+            console.print(f"\n[bold red]💥 Error running '{selected_tool.name}': {e}[/bold red]")
+            input("Press Enter to continue...")
 
 if __name__ == "__main__":
     try:
@@ -63,6 +81,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         console.print("\n[bold red]Aborted by user![/bold red]")
         sys.exit()
-    except Exception as e:  # all other unexpected errors (timeout etc)
+    except Exception as e: 
         console.print(f"\n[bold red]💥 CRITICAL ERROR: {e}[/bold red]")
         sys.exit(1)
