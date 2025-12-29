@@ -12,40 +12,45 @@ from modules.netbox_client import NetBoxClient
 from modules.ip_manager import IPManager
 from modules.bgp_manager import BGPManager
 from modules.utils import get_validated_prefix_limits, select_tenant
+from modules.base_peering import BasePeeringController
 
 # Configuration
 MY_ASN = 5405
 PEER_GROUP_NAME = "Peering - IXP"
 
-console = Console(emoji=False) # otherwise it overwrites Ipv6 adresses to emojis
+console = Console(emoji=False) 
 pdb_client = PeeringDBClient()
 
-# basic Functions
 
-# generate a list of all mutual IXP locations between 5405 and the target ASN
-def get_common_ixps(target_asn):
-    with console.status(f"[bold green]Calculating intersection between AS{MY_ASN} and AS{target_asn}...[/bold green]", spinner="dots"):
-        target_ixps = pdb_client.get_ixp_presence(target_asn)
-        my_ixps = pdb_client.get_ixp_presence(MY_ASN)
-        time.sleep(0.5)
+class IxpPeeringController(BasePeeringController):
+    """
+    Ez a GYEREK (Child).
+    Örökli a szerszámokat, és hozzáteszi az IXP-specifikus tudást.
+    """
 
-    my_ixps_map = {ix['ix_id']: ix for ix in my_ixps}
-    common_list = []
-    
-    for remote_ix in target_ixps:
-        ix_id = remote_ix['ix_id']
-        if ix_id in my_ixps_map:
-            local_ix = my_ixps_map[ix_id]
-            common_list.append({
-                "ix_name": remote_ix['ix_name'],
-                "ix_id": ix_id,
-                "local_ip4": local_ix['ipaddr4'],
-                "remote_ip4": remote_ix['ipaddr4'],
-                "local_ip6": local_ix['ipaddr6'],
-                "remote_ip6": remote_ix['ipaddr6'],
-            })
-    
-    return sorted(common_list, key=lambda x: x['ix_name'])
+    def fetch_common_ixps(self, target_asn: int):
+        self.target_asn = target_asn
+        # Figyeld meg: a 'pdb'-t nem paraméterként kapja, hanem előveszi a táskájából (self)!
+        target_ixps = self.pdb.get_ixp_presence(target_asn)
+        my_ixps = self.pdb.get_ixp_presence(MY_ASN)
+
+        my_ixps_map = {ix['ix_id']: ix for ix in my_ixps}
+        common_list = []
+        
+        for remote_ix in target_ixps:
+            ix_id = remote_ix['ix_id']
+            if ix_id in my_ixps_map:
+                local_ix = my_ixps_map[ix_id]
+                common_list.append({
+                    "ix_name": remote_ix['ix_name'],
+                    "ix_id": ix_id,
+                    "local_ip4": local_ix['ipaddr4'],
+                    "remote_ip4": remote_ix['ipaddr4'],
+                    "local_ip6": local_ix['ipaddr6'],
+                    "remote_ip6": remote_ix['ipaddr6'],
+                })
+        
+        return sorted(common_list, key=lambda x: x['ix_name'])
 
 # show summary about the target AS
 def display_asn_details(net_info):
@@ -67,10 +72,17 @@ def display_asn_details(net_info):
 
 # beginning of the wizard
 def run_ixp_peering_wizard():
+
+    # Inicializálás
+    nb_client = NetBoxClient()
+    
+    # ITT A LÉNYEG: Létrehozzuk a "Szakembert" (Controller)
+    controller = IxpPeeringController(nb_client, pdb_client)
+
     console.clear()
     console.print(Panel("[bold cyan]WIZARD: Create Peering at IXP[/bold cyan]", border_style="cyan"))
     
-    # 1. asking for remote AS, and get details (if possible)
+    # 1. asking for remote AS
     target_asn_str = Prompt.ask("[bold green]?[/bold green] Enter Peer ASN")
     try:
         target_asn = int(target_asn_str)
@@ -85,11 +97,17 @@ def run_ixp_peering_wizard():
         input("Press Enter...")
         return
 
-    # Show Details with function
+    # ITT HÍVJUK MEG A CONTROLLERT (és a View rajzolja a spinnert)
+    common_ixps = []
+    with console.status(f"[bold green]Calculating intersection...[/bold green]", spinner="dots"):
+        # A Controller dolgozik, a View vár
+        common_ixps = controller.fetch_common_ixps(target_asn)
+        time.sleep(0.5) 
+
+    # Show Details
     display_asn_details(net_info)
 
-    # 2. get the list of common IXPs with function
-    common_ixps = get_common_ixps(target_asn)
+    # 2. Check results
     if not common_ixps:
         console.print(f"\n[bold red]⚠️ No common IXPs found between AS{MY_ASN} and AS{target_asn}.[/bold red]")
         input("Press Enter to return...")
@@ -131,14 +149,12 @@ def run_ixp_peering_wizard():
         return
 
     # extract and fix prefix-limits
-
     final_limit_v4, final_limit_v6 = get_validated_prefix_limits(net_info)
 
     # 4. NetBox Validation
-    # the goal is to check if the remote IPs exist in IPAM and if the BGP session exists (by any chance) to never duplicate
     console.print(f"\n[bold cyan]=== VALIDATING RESOURCES FROM NETBOX===[/bold cyan]")
     
-    nb_client = NetBoxClient()
+    # A klienst már fent létrehoztuk, nem kell újra
     ip_mgr = IPManager(nb_client)
     bgp_mgr = BGPManager(nb_client)
     
@@ -190,7 +206,7 @@ def run_ixp_peering_wizard():
 
     console.print(status_table)
 
-    # build the final session list which can actually be created
+    # build the final session list
     actionable_sessions = [s for s in valid_sessions if not s['bgp_exists'] and s['has_subnet']]
     if not actionable_sessions:
         console.print("\n[bold green]🎉 All sessions already exist! No actions needed.[/bold green]")
@@ -203,7 +219,7 @@ def run_ixp_peering_wizard():
 
     console.print(f"[bold green]🔒 Selected: {escape(selected_tenant.name)}[/bold green]")
 
-    # 6. Pre-flight checks and summary
+    # 6. Pre-flight checks
     console.print(f"\n[bold cyan]=== PRE-FLIGHT CHECKS ===[/bold cyan]")
     
     peer_asn_obj = None
@@ -213,14 +229,12 @@ def run_ixp_peering_wizard():
         
         if peer_asn_obj:
             console.print(f"[green]✅ Remote AS exists in NetBox: {target_asn} (NB ID: {peer_asn_obj.id})[/green]")
-            break # Siker, kilépünk a ciklusból
+            break 
         
-        # Ha nincs meg, szólunk és várunk
         console.print(f"\n[bold red]❌ Error: AS{target_asn} not found under tenant '{escape(selected_tenant.name)}'![/bold red]")
         console.print(f"[yellow]Action: Create AS{target_asn} in NetBox assigned to this tenant.[/yellow]")
         console.print(f"[dim]Link: https://netbox.as5405.net/ipam/asns/add/[/dim]")
         
-        # Választási lehetőség: Újrapróbál vagy Kilép
         if Prompt.ask("\nHave you created the ASN? (Select 'y' to retry check)", choices=["y", "n"], default="y") == "n":
             console.print("[dim]Aborted by user.[/dim]")
             return
@@ -228,10 +242,8 @@ def run_ixp_peering_wizard():
     console.print(f"[green]IPv4 Limit: {final_limit_v4} (from PeeringDB)[green]")
     console.print(f"[green]IPv6 Limit: {final_limit_v6} (from PeeringDB)[green]")
 
-    # we don't always need to sync, in case someome's pdb is broken
     should_sync = Prompt.ask("\nEnable 'Sync from PeeringDB'?", choices=["y", "n"], default="y") == "y"
     
-    # MD5 password (optional)
     md5_password = Prompt.ask("\nSet MD5 Password? (Leave empty for None)")
     if md5_password.strip():
         console.print(f"[green]🔒 MD5 Password set ({len(md5_password)} chars)[/green]")
@@ -272,17 +284,16 @@ def run_ixp_peering_wizard():
             clean_name = re.sub(r'[^a-zA-Z0-9]', '', raw_name)
             
             # 4. Description & Session Name Generation
-            session_name = raw_name # Vagy clean_name, ha azt szeretnéd névnek is
+            session_name = raw_name 
             bgp_desc = f"[peer_type=peer_ixp,peer_as={target_asn},peer_name={clean_name}]"
             ip_desc = f"{selected_tenant.name} - {data['ix_name']}"
 
-            # 5. Resolve Local Context & Mask (CRITICAL STEP)
-            # We do this NOW, so we can show errors in the table if local context is missing.
+            # 5. Resolve Local Context & Mask
             local_ip_str = data['local_ip4'] if not is_v6 else data['local_ip6']
             local_ctx = ip_mgr.get_device_site_from_ip(local_ip_str)
             local_ip_obj = ip_mgr.get_ip_address(local_ip_str)
             
-            target_ip_with_cidr = ip_str # Default fallback
+            target_ip_with_cidr = ip_str 
             site_name = "[red]???[/red]"
             device_name = "[red]???[/red]"
             ready_to_deploy = False
@@ -304,8 +315,14 @@ def run_ixp_peering_wizard():
                 'target_ip_with_cidr': target_ip_with_cidr,
                 'site_name': site_name,
                 'device_name': device_name,
-                'local_ctx': local_ctx,           # Pass objects for creation
-                'local_ip_obj': local_ip_obj,     # Pass objects for creation
+                'local_ctx': local_ctx,           
+                'local_ip_obj': local_ip_obj,
+                # Store ID context
+                'my_asn_id': my_asn_obj.id,
+                'peer_asn_id': peer_asn_obj.id,
+                'peer_group_id': peer_group_id,
+                'tenant_id': selected_tenant.id,
+                
                 'prefix_limit': int(prefix_limit),
                 'as_set': final_as_set,
                 'addr_family': addr_family,
@@ -325,17 +342,15 @@ def run_ixp_peering_wizard():
     # --- DISPLAY DRY RUN TABLE ---
     preview_table = Table(title="Planned BGP Sessions (Dry Run)", show_header=True, header_style="bold magenta")
     preview_table.add_column("IXP Name", style="cyan")
-    preview_table.add_column("Remote IP / Device", style="green") # Combined column
+    preview_table.add_column("Remote IP / Device", style="green") 
     preview_table.add_column("Limit", justify="right")
     preview_table.add_column("AS-SET", style="yellow")
     preview_table.add_column("MD5", style="red")
-
 
     for item in deployable_sessions:
         ix_name = item['original_data']['data']['ix_name']
         md5_status = "Yes" if md5_password else "-"
         
-        # Format: IP \n Device
         loc_info = f"{item['target_ip_with_cidr']}\n[dim]on {item['device_name']}[/dim]"
         
         preview_table.add_row(
@@ -352,9 +367,6 @@ def run_ixp_peering_wizard():
         console.print("\n[yellow]🚀 Launching Creation...[/yellow]")
         
         for item in deployable_sessions:
-            # UNPACK PRE-CALCULATED DATA
-            # No more logic here, just API calls!
-            
             data = item['original_data']['data']
             session = item['original_data']
             
@@ -365,10 +377,9 @@ def run_ixp_peering_wizard():
             remote_ip_obj = session['ip_obj']
             if not session['exists']:
                 console.print(f"   Creating Remote IP [cyan]{item['target_ip_with_cidr']}[/cyan]...")
-                new_ip = ip_mgr.create_ip_address(item['target_ip_with_cidr'], selected_tenant.id, item['ip_desc'])
+                new_ip = ip_mgr.create_ip_address(item['target_ip_with_cidr'], item['tenant_id'], item['ip_desc'])
                 if new_ip:
                     console.print(f"     [green]✅ IP Created (ID: {new_ip.id})[/green]")
-                    # Update the object for BGP creation
                     item['original_data']['ip_obj'] = new_ip 
                 else:
                     console.print(f"     [bold red]❌ IP Creation Failed. Skipping BGP.[/bold red]")
@@ -383,12 +394,12 @@ def run_ixp_peering_wizard():
                     name=item['session_name'],
                     site_id=item['local_ctx']['site_id'],
                     device_id=item['local_ctx']['device_id'],
-                    tenant_id=selected_tenant.id,
+                    tenant_id=item['tenant_id'],
                     local_ip_id=item['local_ip_obj'].id,
-                    remote_ip_id=item['original_data']['ip_obj'].id, # Use the object (either found or just created)
-                    local_as_id=my_asn_obj.id,
-                    remote_as_id=peer_asn_obj.id,
-                    peer_group_id=peer_group_id,
+                    remote_ip_id=item['original_data']['ip_obj'].id, 
+                    local_as_id=item['my_asn_id'],
+                    remote_as_id=item['peer_asn_id'],
+                    peer_group_id=item['peer_group_id'],
                     address_family=item['addr_family'],
                     as_set=item['as_set'], 
                     prefix_limit=item['prefix_limit'],
