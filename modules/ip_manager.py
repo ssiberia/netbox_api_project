@@ -55,5 +55,4 @@ class IPManager:
         try:
             return self.nb.ipam.ip_addresses.create(**data)
         except Exception as e:
-            print(f"[red]API Error creating IP {address}: {e}[/red]")
-            return None
+            raise e

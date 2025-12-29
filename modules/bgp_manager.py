@@ -31,6 +31,7 @@ class BGPManager:
                            prefix_limit: int = 0,
                            sync_pdb: bool = False,
                            md5_key: str = "",
+                           peer_type: str = "peer_ixp",
                            description: str = "") -> object:
         
         #Creates a BGP Session with full custom fields support.
@@ -42,7 +43,7 @@ class BGPManager:
         # Custom Fields Construction
         custom_fields = {
             "address_family": address_family,
-            "peer_type": "peer_ixp",
+            "peer_type": peer_type,
             "sync_from_pdb": sync_pdb,
             "bfd": False,
             "drained": False,

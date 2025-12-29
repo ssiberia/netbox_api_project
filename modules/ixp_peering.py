@@ -14,6 +14,7 @@ from modules.bgp_manager import BGPManager
 from modules.utils import get_validated_prefix_limits, select_tenant
 from modules.base_peering import BasePeeringController
 from modules.base_tool import BaseTool
+from modules.strategies import StrictAlphanumericStrategy, UnderscoreStrategy
 
 # Configuration
 MY_ASN = 5405
@@ -287,7 +288,8 @@ class IxpPeeringTool(BaseTool):
                 
                 # 3. Name Sanitization
                 raw_name = selected_tenant.name
-                clean_name = re.sub(r'[^a-zA-Z0-9]', '', raw_name)
+                strategy = StrictAlphanumericStrategy()
+                clean_name = strategy.sanitize(raw_name)
                 
                 # 4. Description & Session Name Generation
                 session_name = raw_name 
